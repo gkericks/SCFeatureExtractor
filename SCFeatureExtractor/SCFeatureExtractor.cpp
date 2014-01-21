@@ -1,6 +1,7 @@
 // SCFeatureExtractor.cpp : Defines the exported functions for the DLL application.
 //
 #include <assert.h>
+#include <limits>
 #include "SCFeatureExtractor.h"
 using namespace BWAPI;
 
@@ -72,12 +73,44 @@ void SCFeatureExtractor::onStart()
 		}
 		
 		avg_unspent_count=0;
+
+		// intialize the vector of vectors which represents map coverage
+		// what this should be is like a 2-d array where the first dimension
+		// is corresponds to the x coordinate and the second dimension corresponds to y
+		// also if super_tile_size!=2 there might be problems (I've assumed map sizes are even)
+		unit_coverage_map.resize((Broodwar->mapWidth()/super_tile_size));
+		for(int i=0;i<(Broodwar->mapWidth()/super_tile_size);i++){
+			std::vector<int> height_vector(Broodwar->mapHeight()/super_tile_size,0);
+			unit_coverage_map[i]=height_vector;
+		}
+		building_coverage_map.resize((Broodwar->mapWidth()/super_tile_size));
+		for(int i=0;i<(Broodwar->mapWidth()/super_tile_size);i++){
+			std::vector<int> height_vector(Broodwar->mapHeight()/super_tile_size,0);
+			building_coverage_map[i]=height_vector;
+		}
+		all_coverage_map.resize((Broodwar->mapWidth()/super_tile_size));
+		for(int i=0;i<(Broodwar->mapWidth()/super_tile_size);i++){
+			std::vector<int> height_vector(Broodwar->mapHeight()/super_tile_size,0);
+			all_coverage_map[i]=height_vector;
+		}
+		coverage_map_counter=0;
+
+		// we also want to figure out how many super tiles units could possibly be in
+		// and same for buildings
+		for (int x=0;x<Broodwar->mapWidth();x++){
+			for (int y=0;y<Broodwar->mapWidth();y++){
+				
+			}
+		}
+
+
 	}
 
 }
 
 void SCFeatureExtractor::onFrame()
 {
+
 	// first do any state updates that need to be done
 	for(std::set<Player*>::iterator p=Broodwar->getPlayers().begin();p!=Broodwar->getPlayers().end();p++){
 		// account for the neutral player
@@ -88,6 +121,35 @@ void SCFeatureExtractor::onFrame()
 	}
 		
 	avg_unspent_count+=1;
+
+	//for(std::set<Player*>::iterator p=Broodwar->getPlayers().begin();p!=Broodwar->getPlayers().end();p++){
+	//	Broodwar->setReplayVision((*p),false);
+	//}
+
+
+	// testing visibility code here
+	/*for(std::set<Player*>::iterator p=Broodwar->getPlayers().begin();p!=Broodwar->getPlayers().end();p++){
+		if ((*p)->getID()!=-1 && !(*p)->isObserver()){
+			int cur_visible_count=0;
+			for (int x=0;x<Broodwar->mapWidth();x++){
+				for (int y=0;y<Broodwar->mapHeight();y++){
+					if (Broodwar->isVisible(x,y)){
+						cur_visible_count+=1;
+					}
+				}
+			}
+			Broodwar->printf("pl_id: %d, cur vis: %d",(*p)->getID(),cur_visible_count);
+			//for (std::set<Unit*>::const_iterator u=(*p)->getUnits().begin();u!=(*p)->getUnits().end();u++){
+				//(*u)->
+			//	(*p)->sightRange((*u)->getType());
+			//}
+		
+		}
+	}
+	*/
+
+
+
 
 	if (Broodwar->getFrameCount()%dump_frame_period==0 && Broodwar->getFrameCount()!=0){
 		
@@ -120,6 +182,56 @@ void SCFeatureExtractor::onFrame()
 
 	}
 
+}
+
+/***
+* This function computes a score for the given player
+* the score is the number of 'super tiles' that the player has a unit/building in
+* scores are returned in a triple (a boost tuple), the order being
+* (unit score,building score, all score)
+**/
+boost::tuple<int,int,int> SCFeatureExtractor::compute_map_coverage_score(Player* cur_player){
+	
+	// before we start, increment the counter
+	// this value is now 'true' for this context
+	coverage_map_counter++;
+
+	assert(coverage_map_counter!=std::numeric_limits<int>::max());
+
+	// and keep track of how many were switched on
+	int unit_score=0;
+	int building_score=0;
+	int all_score=0;
+
+	for (std::set<Unit*>::const_iterator u=cur_player->getUnits().begin();u!=cur_player->getUnits().end();u++){
+		// use integer division to get the indices
+		int x_index = (int) (*u)->getTilePosition().x()/ super_tile_size;
+		int y_index = (int) (*u)->getTilePosition().y()/ super_tile_size;
+
+
+		if (!(*u)->getType().isBuilding()){
+			// assume that not building means unit
+			if (unit_coverage_map[x_index][y_index]!=coverage_map_counter){
+				unit_score++;
+				unit_coverage_map[x_index][y_index]=coverage_map_counter;
+			}
+		}
+		else {
+			// if it is a building
+			if (building_coverage_map[x_index][y_index]!=coverage_map_counter){
+				building_score++;
+				building_coverage_map[x_index][y_index]=coverage_map_counter;
+			}
+		}
+
+		// and then do the all case all the time
+		if (all_coverage_map[x_index][y_index]!=coverage_map_counter){
+			all_score++;
+			all_coverage_map[x_index][y_index]=coverage_map_counter;
+		}
+	}
+	
+	return boost::tuple<int,int,int>(unit_score,building_score,all_score);
 }
 
 /**
@@ -293,6 +405,27 @@ void SCFeatureExtractor::doDump(){
 
 					}
 				}
+
+				// there are a few 'simple' map features we could get
+				// the question is how do we get the vision/explored for each player separately
+				// that proved... difficult, so let's use an approximate map coverage feature instead
+				boost::tuple<int,int,int> score_triple = compute_map_coverage_score((*p));
+
+				// and write the three scores
+				writeData << "unit_coverage_score:";
+				writeData << score_triple.get<0>();
+				writeData << ",";
+				writeData << "building_coverage_score:";
+				writeData << score_triple.get<1>();
+				writeData << ",";
+				writeData << "all_coverage_score:";
+				writeData << score_triple.get<2>();
+				writeData << ",";
+
+				// it will also be useful to know what that score is out of
+				writeData << "max_coverage_score:";
+				writeData << ((int) Broodwar->mapWidth()/super_tile_size)*((int) Broodwar->mapHeight()/super_tile_size);
+				writeData << ",";
 
 				writeData << "\n";
 			}

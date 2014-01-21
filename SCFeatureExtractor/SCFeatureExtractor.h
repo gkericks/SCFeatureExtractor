@@ -1,6 +1,8 @@
 #include <BWAPI.h>
 #include <fstream>
 #include <map>
+#include <vector>
+#include <boost\tuple\tuple.hpp>
 
 using namespace BWAPI;
 
@@ -53,6 +55,8 @@ const UnitType zerg_units[] = {UnitTypes::Zerg_Broodling,UnitTypes::Zerg_Cocoon,
 	UnitTypes::Zerg_Spire,UnitTypes::Zerg_Spore_Colony,UnitTypes::Zerg_Sunken_Colony,UnitTypes::Zerg_Ultralisk,UnitTypes::Zerg_Ultralisk_Cavern,UnitTypes::Zerg_Zergling};
 const int zerg_units_length = 35;
 
+// this is how many tiles are in one 'super tile'
+const int super_tile_size=2;
 
 class SCFeatureExtractor : public BWAPI::AIModule
 {
@@ -63,6 +67,9 @@ public:
 
   // logic to actually dump the vectors to file
   void doDump();
+
+  // function for computing the map coverage score for a player
+  boost::tuple<int,int,int> compute_map_coverage_score(Player* cur_player);
 
   // the file handle we will be writing to
   std::ofstream writeData;
@@ -83,5 +90,18 @@ public:
   // this is a count of how many times the current mineral/gas count has been added,
   // used to find the avg 
   int avg_unspent_count;
+
+  // this vector of vectors is used to keep track of unit placment
+  // it is a major approximation for the vision coverage feature
+  std::vector<std::vector<int>> unit_coverage_map;
+
+  // same as unit_coverage_map but for buildings
+  std::vector<std::vector<int>> building_coverage_map;
+
+  // same as unit_coverage_map and building_coverage_map but for units and buildings
+  std::vector<std::vector<int>> all_coverage_map;
+
+  // use this variable so that you don't have to 'flush' the coverage_map each iteration
+  int coverage_map_counter;
 
 };
