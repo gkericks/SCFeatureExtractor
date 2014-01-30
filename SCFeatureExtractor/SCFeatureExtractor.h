@@ -104,4 +104,24 @@ public:
   // use this variable so that you don't have to 'flush' the coverage_map each iteration
   int coverage_map_counter;
 
+  // just used to store how many super_tiles can actually be built in
+  int build_tile_count;
+
+  // just used to store how many super tiles can actually be walked through (so can have units on)
+  int walk_tile_count;
+
+  // now to approximate apm we want to look at the orders players are making 
+  // to do that we need to know when an order is a new order, so we can use these maps to
+  // manage that, this is borrowed from Gabriel Synnaeve's BWRepDump project
+  std::map<BWAPI::Unit*, BWAPI::Order> unitOrders;
+  std::map<BWAPI::Unit*, BWAPI::Unit*> unitOrdersTargets;
+  std::map<BWAPI::Unit*, BWAPI::Position> unitOrdersTargetPositions;
+
+  // and a map for telling how many orders each player has executed
+  std::map<int, int> numOrders;
+
+  // for keeping track of number of frames workers have been idle for
+  // this is a measure of skill, since good players don't usually let thier workers sit around all the time
+  std::map<int, int> idleWorkerCount;
+
 };
