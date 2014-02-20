@@ -29,8 +29,10 @@ void SCFeatureExtractor::onStart()
 		// if you want a custom directory, modify and use these lines
 		std::string folderpath = "C:\\Users\\Graham\\Desktop\\PvT-feature-vector-files\\";
 		std::string filepath = folderpath + Broodwar->mapFileName().substr(0,Broodwar->mapFileName().length()-4) + "-feature-vectors.txt";
+		std::string battle_filepath = folderpath + Broodwar->mapFileName().substr(0,Broodwar->mapFileName().length()-4) + "-battle-info.txt";
 
 		writeData.open(filepath.c_str());
+		writeBattleData.open(battle_filepath.c_str());
 
 		// intializations happen here
 		// construct a map for each player for mapping unit types to counts
@@ -76,6 +78,9 @@ void SCFeatureExtractor::onStart()
 				avg_unspent_gas_total[(*p)->getID()]=0;
 				numOrders[(*p)->getID()]=0;
 				idleWorkerCount[(*p)->getID()]=0;
+				supplyUsedUpFrameCount[(*p)->getID()]=0;
+				idleProdFacTotal[(*p)->getID()] = 0;
+				queuedUnitsTotal[(*p)->getID()] = 0;
 			}
 		}
 		
@@ -150,12 +155,395 @@ void SCFeatureExtractor::onStart()
 		}
 		build_tile_count = is_buildable_counter;
 		walk_tile_count = is_walkable_counter;
+
+		battlesIDCount=0;
 	}
 
 }
 
+void SCFeatureExtractor::onUnitCreate(Unit* unit){
+	//if (unit->getID()==187){
+	//	Broodwar->printf("unit 187 is created");
+	//}
+}
+
+void SCFeatureExtractor::onUnitDestroy(Unit* unit){
+	
+	
+	/*
+	if (unit->getID()==187){
+		Broodwar->printf("unit 187 died at: %d %d", unit->getPosition().x(), unit->getPosition().y());
+		Broodwar->printf(unit->getOrder().getName().c_str());
+		Broodwar->printf("is completed: %d",unit->isCompleted());
+	}
+	else{
+		Broodwar->printf("on destroy unit %d is completed: %d",unit->getID(),unit->isCompleted());
+	}*/
+
+	// don't care about friendly fire
+	if (unit->getLastAttackingPlayer()!=NULL && unit->getLastAttackingPlayer()->getID()==unit->getPlayer()->getID())
+		return;
+
+	// make sure units from non players/observers don't get counted
+	if (unit->getPlayer()->isObserver() || unit->getPlayer()->getID()==-1)
+		return;
+
+	// if the unit wasn't completed yet (i.e. it was cancelled) we don't want to count that
+	if (!unit->isCompleted())
+		return;
+
+	// we don't want things like spider mines starting a new battle
+	// only this if statement might also avoid a lot of zerg units...
+	//if (!unit->getType().isBuilding() && !unit->getType().whatBuilds().first.isBuilding())
+	//	return;
+
+	// so let's just explicitly put what we want to avoid
+	//if (unit->getType()==UnitTypes::Terran_Vulture_Spider_Mine || unit->getType()==UnitTypes::Protoss_Scarab || unit->getType()==UnitTypes::Protoss_Interceptor)
+	//	return;
+
+	// should spells start battles?  Scanner sweep definitely should not, not sure about the other two
+	if (unit->getType()==UnitTypes::Spell_Dark_Swarm || unit->getType()==UnitTypes::Spell_Disruption_Web || unit->getType()==UnitTypes::Spell_Scanner_Sweep)
+		return;
+
+#ifdef DEBUG_BATTLES_OUTPUT
+	writeBattleData << "Destroyed:" << unit->getType().getName() << ":" << unit->getID() << ":" << Broodwar->getFrameCount() << ":" << unit->getPlayer()->getID() << "\n";
+#endif
+
+	// so first we check if the unit is in the range of another battle or not
+	// if it is, we just let onFrame up date it, so return from here
+	for(std::list<battle>::iterator i=trackedBattles.begin();i!=trackedBattles.end();i++){
+		if (unit->getPosition().getDistance(i->battleCenter)<=i->radius){
+#ifdef DEBUG_BATTLES_OUTPUT
+			writeBattleData << "Unit: " << unit->getID() << " is in battle range: " << i->id << "\n";
+#endif
+			return;
+		}
+	}
+
+	
+	
+	// if we haven't return yet that means this unit is not in range of another battle,
+	// which means we need to start up a new battle
+	battle newBattle;
+	newBattle.startTime=Broodwar->getFrameCount();
+	newBattle.curTime=Broodwar->getFrameCount();
+
+	// so let's put a default radius around this unit's position, and use that to grab what unit we want in initially
+	std::list<Unit*> includedUnits;
+	int numNonBuildings=0;
+	int totX=0;
+	int totY=0;
+
+	// for keeping track of if both sides have fighting units in the battle
+	int numPlayersWithNonBuildingsNonAmmo=0;
+	// the only problem is that the unit that dies isn't included and it might affect which players are added
+	bool isCurPlayerCounted=false;
+
+	// also we probably want to add the destroyed unit (whose death started the battle) to our data structures
+	includedUnits.push_back(unit);
+	
+
+	for (std::set<Player*>::iterator p=Broodwar->getPlayers().begin();p!=Broodwar->getPlayers().end();p++){
+		if (!(*p)->isObserver() && (*p)->getID()!=-1){
+			std::map<Unit*,int> unitTimeMap;
+			newBattle.enteredUnits[(*p)->getID()] = unitTimeMap;
+
+			// for checking if this player added anything
+			bool hasPlayerUnits=false;
+
+			for (std::set<Unit*>::const_iterator u=(*p)->getUnits().begin();u!=(*p)->getUnits().end();u++){
+				
+				// don't include incomplete units or units that really are just ammo
+				//if ((*u)->isCompleted() && (*u)->getType()!=UnitTypes::Terran_Vulture_Spider_Mine && (*u)->getType()!=UnitTypes::Protoss_Scarab && (*u)->getType()!=UnitTypes::Protoss_Interceptor){
+				if ((*u)->isCompleted()){
+					// now lets just add units within the default range of the dead unit
+					if ((*u)->getPosition().getDistance(unit->getPosition())<=DEFAULT_RADIUS){
+						includedUnits.push_back((*u));
+						newBattle.enteredUnits[(*p)->getID()][(*u)]=Broodwar->getFrameCount();
+						newBattle.trackedUnitTypes[(*u)->getID()] = (*u)->getType();
+						// count military units, basically units and cannons
+						if (!(*u)->getType().isBuilding() || (*u)->getType()==UnitTypes::Protoss_Photon_Cannon || (*u)->getType()==UnitTypes::Terran_Missile_Turret || 
+							(*u)->getType()==UnitTypes::Terran_Bunker || (*u)->getType()==UnitTypes::Zerg_Sunken_Colony && ((*u)->getType()!=UnitTypes::Terran_Vulture_Spider_Mine && (*u)->getType()!=UnitTypes::Protoss_Scarab && (*u)->getType()!=UnitTypes::Protoss_Interceptor)){
+							numNonBuildings+=1;
+							totX+=(*u)->getPosition().x();
+							totY+=(*u)->getPosition().y();
+						}
+
+						// now its only a battle if both sides have something besides mines
+						if ((*u)->getType()!=UnitTypes::Terran_Vulture_Spider_Mine && (*u)->getType()!=UnitTypes::Protoss_Scarab && (*u)->getType()!=UnitTypes::Protoss_Interceptor){
+							hasPlayerUnits=true;
+							if ((*p)->getID()==unit->getPlayer()->getID())
+								isCurPlayerCounted=true;
+						}
+
+					}
+				}
+			}
+			if (hasPlayerUnits)
+				numPlayersWithNonBuildingsNonAmmo+=1;
+
+		}
+	}
+
+	newBattle.enteredUnits[unit->getPlayer()->getID()][unit] = Broodwar->getFrameCount();
+	newBattle.trackedUnitTypes[unit->getID()] = unit->getType();
+
+	if (!isCurPlayerCounted && unit->getType()!=UnitTypes::Terran_Vulture_Spider_Mine && unit->getType()!=UnitTypes::Protoss_Scarab && unit->getType()!=UnitTypes::Protoss_Interceptor)
+		numPlayersWithNonBuildingsNonAmmo+=1;
+
+	//  Watch out for when numNonBuildings is zero
+	if (numNonBuildings==0)
+		return;
+
+	// also if only one player has units (that aren't buildings or mines/scarabs/interceptors), that isn't a battle
+	if (numPlayersWithNonBuildingsNonAmmo<2)
+		return;
+
+	// now to get the position of the match, it is the average position of the potentially fighting units we grabbed
+	newBattle.battleCenter = Position(totX/numNonBuildings,totY/numNonBuildings);
+	// and we need the radius
+	int cur_radius=DEFAULT_RADIUS;
+	for (std::list<Unit*>::const_iterator u=includedUnits.begin();u!=includedUnits.end();u++){
+		int tmpDis = (*u)->getDistance(newBattle.battleCenter) + std::max((*u)->getType().groundWeapon().maxRange(),(*u)->getType().airWeapon().maxRange());
+		if (tmpDis>cur_radius){
+			cur_radius=tmpDis;
+		}
+	}
+
+	newBattle.radius=cur_radius;
+
+#ifdef DEBUG_BATTLES_OUTPUT
+	writeBattleData << "Destroyed and starting a battle:" << unit->getType().getName() << ":" << unit->getID() << ":" << Broodwar->getFrameCount() << ":" << unit->getPlayer()->getID() << "\n";
+#endif
+
+	// give battle an id
+	newBattle.id=battlesIDCount;
+	battlesIDCount++;
+
+	// make sure we know that these units are all apart of a battle now
+	for(std::map<int, std::map<Unit*, int>>::iterator it=newBattle.enteredUnits.begin();it!=newBattle.enteredUnits.end();it++){
+		for (std::map<Unit*, int>::iterator u_it=it->second.begin();u_it!=it->second.end();u_it++){
+			inBattleIds.insert(u_it->first->getID());
+		}
+	}
+
+	// then start tracking the new battle
+	trackedBattles.push_back(newBattle);
+
+}
+
+void SCFeatureExtractor::endBattle(battle c, int end_time){
+	// so here we are dumping the contents of the battle,
+	//  start time is important
+	battle* b = &c;
+	writeBattleData << "battleID:" << b->id << ",";
+	writeBattleData << "startTime:" << b->startTime << ",";
+	writeBattleData << "startUnits:";
+
+	// then just dump each unit with the time they entered the battle, we will deal with deaths etc after
+	for(std::map<int, std::map<Unit*, int>>::iterator it=b->enteredUnits.begin();it!=b->enteredUnits.end();it++){
+		writeBattleData << it->first << ": {";
+		// now iterate through the unit map
+		for (std::map<Unit*, int>::iterator u_it=it->second.begin();u_it!=it->second.end();u_it++){
+			
+			if (u_it->first->getType()==UnitTypes::Unknown)
+				writeBattleData << b->trackedUnitTypes[u_it->first->getID()].getName() << ":";
+			else
+				writeBattleData << u_it->first->getType().getName() << ":";
+			//writeBattleData << u_it->first->getHitPoints() << ":";
+			writeBattleData << u_it->first->getID() << ":";
+			writeBattleData << u_it->second << ",";
+
+			// also make sure the unit is now longer being considered in a battle
+			inBattleIds.erase(u_it->first->getID());
+
+		}
+
+		writeBattleData << "}, ";
+	
+	}
+
+	// lets make the end time the last updated time
+	writeBattleData << "endTime:" << end_time << ",";
+	writeBattleData << "exitUnits:";
+
+	// now we want to tell who is alive at the end, so we'll go back through the units
+	// and if they are not dead, we will include them
+	for(std::map<int, std::map<Unit*, int>>::iterator it=b->enteredUnits.begin();it!=b->enteredUnits.end();it++){
+		writeBattleData << it->first << ": {";
+		for (std::map<Unit*, int>::iterator u_it=it->second.begin();u_it!=it->second.end();u_it++){
+			// not sure if this is the correct way to check if the unit is alive or not
+			//if (u_it->first->getHitPoints()>0){
+			
+			if (u_it->first->exists() && !(u_it->first->getPlayer()->isDefeated()) && !(u_it->first->getPlayer()->leftGame())){
+				writeBattleData << u_it->first->getType().getName() << ":";
+				//writeBattleData << u_it->first->getHitPoints() << ":";
+				writeBattleData << u_it->first->getID() << ",";
+
+			}
+
+		}
+		writeBattleData << "}, ";
+	}
+
+	writeBattleData << "\n";
+
+}
+
+void SCFeatureExtractor::updateBattles(){
+
+	// iterate through battles, update all of them as neccessary
+	std::list<battle>::iterator b=trackedBattles.begin();
+	while (b!=trackedBattles.end()){
+		std::set<Unit*> applicableUnits = Broodwar->getUnitsInRadius(b->battleCenter,b->radius);
+		
+		// if there are no units in the battle area, end the battle, otherwise update the battle
+		if (applicableUnits.size()==0){
+#ifdef DEBUG_BATTLES_OUTPUT
+			writeBattleData << "no units at all in area\n";
+#endif
+			//endBattle(&(*b));
+			endBattle((*b),Broodwar->getFrameCount());
+			trackedBattles.erase(b++);
+		}
+		else {
+			// now we look at the applicable units and add the ones that haven't already been added to the battle
+			// we can also grab the new center position here
+			int xTotPos = 0;
+			int yTotPos = 0;
+			int totUnitsCounted=0;
+			//  are there units actively attacking/beingattacked?
+			bool isAttack=false; 
+
+			// first pass checks if new units should be added
+			for (std::set<Unit*>::iterator u=applicableUnits.begin();u!=applicableUnits.end();u++){
+				//if (!(*u)->getPlayer()->isObserver() && (*u)->getPlayer()->getID()!=-1 && (*u)->isCompleted() &&
+				//	(*u)->getType()!=UnitTypes::Terran_Vulture_Spider_Mine && (*u)->getType()!=UnitTypes::Protoss_Scarab && (*u)->getType()!=UnitTypes::Protoss_Interceptor){
+				if (!(*u)->getPlayer()->isObserver() && (*u)->getPlayer()->getID()!=-1 && (*u)->isCompleted()){
+
+					int curPlId = (*u)->getPlayer()->getID();
+			
+					//xTotPos+=(*u)->getPosition().x();
+					//yTotPos+=(*u)->getPosition().y();
+					//totUnitsCounted++;
+
+					bool okayToConsider=true;
+					// has this unit entered the battle already? If not then add it
+					if (b->enteredUnits[curPlId].count((*u))==0 && ((*u)->isAttacking() || (*u)->isStartingAttack() || (*u)->isUnderAttack() || (*u)->isAttackFrame())){
+						
+						// so this is the is this unit in a battle already check
+						if (inBattleIds.count((*u)->getID())==0){
+							b->enteredUnits[curPlId][(*u)]=Broodwar->getFrameCount();
+							b->trackedUnitTypes[(*u)->getID()]=(*u)->getType();
+							inBattleIds.insert((*u)->getID());
+						}
+						else{
+							// so this happens when a unit is not in this battle yet, but is already in another battle, we do not
+							// want to be considering it for this battle
+							okayToConsider=false;
+						}
+					}
+
+					// is unit attacking or being attacked?
+					if (okayToConsider && ((*u)->isAttacking() || (*u)->isStartingAttack() || (*u)->isUnderAttack() || (*u)->isAttackFrame())){
+						isAttack=true;
+					}
+				}
+			}
+
+			std::map<int,int> plUnitsCounted;
+			// second pass computes new totUnits and positions, as well as counts for the players
+			// only counts units that are both in the range and in our battle (so have attacked/been attacked before)
+			for (std::set<Unit*>::iterator u=applicableUnits.begin();u!=applicableUnits.end();u++){
+				
+				// so i've included mines in the battles, but not as part of the calculations....
+				if  (!(*u)->getPlayer()->isObserver() && (*u)->getPlayer()->getID()!=-1 && b->enteredUnits[(*u)->getPlayer()->getID()].count((*u))!=0 && (*u)->isCompleted() &&
+					(*u)->getType()!=UnitTypes::Terran_Vulture_Spider_Mine && (*u)->getType()!=UnitTypes::Protoss_Scarab && (*u)->getType()!=UnitTypes::Protoss_Interceptor){
+					
+					xTotPos+=(*u)->getPosition().x();
+					yTotPos+=(*u)->getPosition().y();
+					totUnitsCounted++;
+
+					if (plUnitsCounted.count((*u)->getPlayer()->getID())==0)
+						plUnitsCounted[(*u)->getPlayer()->getID()]=1;
+					else
+						plUnitsCounted[(*u)->getPlayer()->getID()]+=1;
+				}
+			}
+
+			bool isOneSideDone=false;
+			int isDoneCount=0;
+			int isNotDoneCount=0;
+			// now we can use plUnitsCounted to see if one player is done (no units in the battle)
+			for (std::map<int,std::map<Unit*,int>>::const_iterator p = b->enteredUnits.begin();p!=b->enteredUnits.end();p++){
+				if (plUnitsCounted.count((*p).first)==0){
+					isOneSideDone=true;
+					isDoneCount++;
+				}
+				else{
+					isNotDoneCount++;
+				}
+			}
+
+
+			// so after we do this, totUnitsCounted could be zero,
+			// if there were unit in applicableUnits like mineral patches that we won't count, but no unit we do count
+			// so use this as a battle termination condition as well
+			if (totUnitsCounted==0 || (isOneSideDone && isNotDoneCount!=2)){
+#ifdef DEBUG_BATTLES_OUTPUT
+				if (totUnitsCounted==0)
+					writeBattleData << "no units that we count\n";
+				if (isOneSideDone)
+					writeBattleData << "at least one side is out of units\n";
+#endif
+				//endBattle(&(*b));
+				endBattle((*b),Broodwar->getFrameCount());
+				trackedBattles.erase(b++);
+			}
+			else{
+				// update the battle position, then get the new radius
+				b->battleCenter = Position(xTotPos/totUnitsCounted,yTotPos/totUnitsCounted);
+				int cur_radius = DEFAULT_RADIUS;
+				for (std::set<Unit*>::iterator u=applicableUnits.begin();u!=applicableUnits.end();u++){
+					if (!(*u)->getPlayer()->isObserver() && (*u)->getPlayer()->getID()!=-1 && b->enteredUnits[(*u)->getPlayer()->getID()].count((*u))!=0){
+						int tmpDis = (*u)->getDistance(b->battleCenter) + std::max((*u)->getType().groundWeapon().maxRange(),(*u)->getType().airWeapon().maxRange());
+						if (tmpDis>cur_radius){
+							cur_radius=tmpDis;
+						}
+					}
+				}
+
+				b->radius=cur_radius;
+
+				if (isAttack){
+					b->curTime=Broodwar->getFrameCount();
+				}
+
+
+				// we need another case where battles can finish/be removed
+				// probably a time out of sorts
+				if ((Broodwar->getFrameCount()-(b->curTime))>=TIME_LIMIT_SINCE_ACTIVITY){
+#ifdef DEBUG_BATTLES_OUTPUT
+					writeBattleData << "time out\n";
+#endif
+					//endBattle(&(*b));
+					endBattle((*b),b->curTime);
+					trackedBattles.erase(b++);
+				}
+				else
+					++b;
+			}
+		}
+	}
+
+
+}
+
+
+
 void SCFeatureExtractor::onFrame()
 {
+	//Broodwar->printf("is zealot built by a building: %d",BWAPI::UnitTypes::Protoss_Zealot.whatBuilds().first.isBuilding());
 
 	// first do any state updates that need to be done
 	for(std::set<Player*>::iterator p=Broodwar->getPlayers().begin();p!=Broodwar->getPlayers().end();p++){
@@ -164,10 +552,28 @@ void SCFeatureExtractor::onFrame()
 			avg_unspent_mineral_total[(*p)->getID()]+=(*p)->minerals();
 			avg_unspent_gas_total[(*p)->getID()]+=(*p)->gas();
 
+			// check if supply is all used up
+			if ((*p)->supplyTotal()==(*p)->supplyUsed()){
+				supplyUsedUpFrameCount[(*p)->getID()]++;
+			}
+
+			int tmp_count_queued_units=0;
+			int tmp_count_idle_proc_fac=0;
+
 			// let us also look at the unit orders..
 			// we can get an idea of how many orders are being executed by each player
 			for (std::set<BWAPI::Unit*>::const_iterator u=(*p)->getUnits().begin();u!=(*p)->getUnits().end();u++){
 			
+				if ((*u)->getType().isBuilding() && (*u)->getType().canProduce()){
+					
+					if (!(*u)->isTraining())
+						tmp_count_idle_proc_fac++;
+					else{
+						// -1 because training queue includes the currently trained unit
+						tmp_count_queued_units+=((*u)->getTrainingQueue().size()-1);
+					}
+				}
+
 				// getting the number of idle workers on each frame
 				if ((*u)->getType().isWorker() && (*u)->isIdle() && (*u)->isCompleted() && !(*u)->isGatheringMinerals() && !(*u)->isCarryingMinerals() && 
 					!(*u)->isGatheringGas() && !(*u)->isCarryingGas() && !(*u)->isConstructing() && !(*u)->isMorphing() && !(*u)->isRepairing() &&
@@ -226,12 +632,12 @@ void SCFeatureExtractor::onFrame()
 
 			}
 
-
+			idleProdFacTotal[(*p)->getID()] += tmp_count_idle_proc_fac;
+			queuedUnitsTotal[(*p)->getID()] += tmp_count_queued_units;
 		}
 	}
 		
 	avg_unspent_count+=1;
-
 
 	//for(std::set<Player*>::iterator p=Broodwar->getPlayers().begin();p!=Broodwar->getPlayers().end();p++){
 	//	Broodwar->setReplayVision((*p),false);
@@ -261,7 +667,7 @@ void SCFeatureExtractor::onFrame()
 
 
 
-
+	updateBattles();
 	if (Broodwar->getFrameCount()%dump_frame_period==0 && Broodwar->getFrameCount()!=0){
 		
 		// compute the current state of the unit maps for each player
@@ -288,6 +694,7 @@ void SCFeatureExtractor::onFrame()
 		}
 		*/
 
+		
 		// then do the dump if it is time
 		this->doDump();
 
@@ -350,7 +757,7 @@ boost::tuple<int,int,int> SCFeatureExtractor::compute_map_coverage_score(Player*
 *  it will write a single line for the feature vector
 **/
 void SCFeatureExtractor::doDump(){
-	Broodwar->printf("Doing the dump!");
+	//Broodwar->printf("Doing the dump!");
 
 	for(std::set<Player*>::iterator p=Broodwar->getPlayers().begin();p!=Broodwar->getPlayers().end();p++){
 		// account for the neutral player, as in don't dump for that player
@@ -400,6 +807,9 @@ void SCFeatureExtractor::doDump(){
 				writeData << "repair_gas:";
 				writeData << (*p)->repairedGas();
 				writeData << ",";
+				// resources that were refunded, gives a sense of how much cancelling a player has done
+				writeData << "refunded_minerals:" << (*p)->refundedMinerals() << ",";
+				writeData << "refunded_gas:" << (*p)->refundedGas() << ",";
 				//avg unspent resources
 				writeData << "avg_unspent_minerals:";
 				writeData <<  ((float)avg_unspent_mineral_total[(*p)->getID()])/((float) avg_unspent_count);
@@ -416,7 +826,8 @@ void SCFeatureExtractor::doDump(){
 				writeData << ((float)(*p)->gatheredGas())/(((float)Broodwar->getFrameCount())/24.0);
 				writeData << ",";
 
-
+				//how many units are incomplete i.e. being queued
+				int incomplete_unit_count=0;
 
 				// so now unit count, do these based on race
 				// we'll have three columns for each unit type,
@@ -435,6 +846,11 @@ void SCFeatureExtractor::doDump(){
 						writeData << "-dead:";
 						writeData << (*p)->deadUnitCount(protoss_units[i]);
 						writeData << ",";
+
+						// looking at units that are built by production facilities
+						if (!protoss_units[i].isBuilding() && protoss_units[i].whatBuilds().first.isBuilding()){
+							incomplete_unit_count+=(*p)->incompleteUnitCount(protoss_units[i]);
+						}
 					}
 				}
 				else if ((*p)->getRace()==BWAPI::Races::Terran) {
@@ -451,6 +867,11 @@ void SCFeatureExtractor::doDump(){
 						writeData << "-dead:";
 						writeData << (*p)->deadUnitCount(terran_units[i]);
 						writeData << ",";
+
+						// looking at units that are built by production facilities
+						if (!terran_units[i].isBuilding() && terran_units[i].whatBuilds().first.isBuilding()){
+							incomplete_unit_count+=(*p)->incompleteUnitCount(terran_units[i]);
+						}
 					}
 				}
 				else if ((*p)->getRace()==BWAPI::Races::Zerg){
@@ -467,6 +888,11 @@ void SCFeatureExtractor::doDump(){
 						writeData << "-dead:";
 						writeData << (*p)->deadUnitCount(zerg_units[i]);
 						writeData << ",";
+
+						// looking at units that are built by production facilities
+						if (!zerg_units[i].isBuilding() && zerg_units[i].whatBuilds().first.isBuilding()){
+							incomplete_unit_count+=(*p)->incompleteUnitCount(zerg_units[i]);
+						}
 					}
 				}
 
@@ -560,7 +986,23 @@ void SCFeatureExtractor::doDump(){
 				int num_workers_other=0;
 				int num_workers_who_knows=0;
 				int num_workers_scouting=0;
+				int num_production_buildings=0;
+				int num_idle_production_buildings=0;
+				int num_queued_units=0;
 				for (std::set<Unit*>::const_iterator u=(*p)->getUnits().begin();u!=(*p)->getUnits().end();u++){
+					
+					// how about checking number of production facilities, then comparing that to the incomplete unit counts
+					if ((*u)->getType().isBuilding() && (*u)->getType().canProduce()){
+						num_production_buildings++;
+
+						if (!(*u)->isTraining())
+							num_idle_production_buildings++;
+						else{
+							// -1 because training queue includes the currently trained unit
+							num_queued_units+=((*u)->getTrainingQueue().size()-1);
+						}
+					}
+					
 					// we're looking at workers, and we don't want to count incomplete units, those are already shown in another feature
 					if((*u)->getType().isWorker() && (*u)->isCompleted()){
 						// minerals
@@ -687,16 +1129,68 @@ void SCFeatureExtractor::doDump(){
 				writeData << ((float)numOrders[(*p)->getID()] / (((float)Broodwar->getFrameCount()/24.0)/60.0))/(float)Broodwar->getFrameCount();
 				writeData << ",";
 
+				// supply features
+				writeData << "available_supply:";
+				writeData << (*p)->supplyTotal();
+				writeData << ",";
+
+				writeData << "currently_used_supply:" << (*p)->supplyUsed() << ",";
+
+				writeData << "current_unused_supply:" << (*p)->supplyTotal()-(*p)->supplyUsed() << ",";
+
+				// having to do with not being able to produce units
+				writeData << "frames_that_supply_is_maxed_out:" << supplyUsedUpFrameCount[(*p)->getID()] << ",";
+
+				// using incomplete unit count and number of production facilities we can say how many units are being queued and how many production facitilites are idle
+				int queueCount=0;
+				int idleProductionFacCount=0;
+				if (incomplete_unit_count>num_production_buildings)
+					queueCount=incomplete_unit_count-num_production_buildings;
+				if (incomplete_unit_count<num_production_buildings)
+					idleProductionFacCount=num_production_buildings-incomplete_unit_count;
+
+				// this is confusing, but this is the number of queued units more than there are production facilities
+				writeData << "num_units_queued_more_than_fac:" << queueCount << ",";
+				writeData << "num_idle_prod_fac_less_than_queued:" << idleProductionFacCount << ",";
+
+				writeData << "num_queued_units:" << num_queued_units << ",";
+				writeData << "num_idle_production_facilities:" << num_idle_production_buildings << ",";
+
+				writeData << "avg_queued_units:" << (float)queuedUnitsTotal[(*p)->getID()]/(float)avg_unspent_count << ",";
+				writeData << "avg_idle_prod_facilities:" << (float)idleProdFacTotal[(*p)->getID()]/(float)avg_unspent_count << ",";
+
+
+				// finally, lets add in the game score features, these are for a baseline
+				writeData << "unit_score:" << (*p)->getUnitScore() << ",";
+				writeData << "kill_score:" << (*p)->getKillScore() << ",";
+				writeData << "building_score:" << (*p)->getBuildingScore() << ",";
+				writeData << "razing_score:" << (*p)->getRazingScore();
+
+				// the resource features were already added
+
 				writeData << "\n";
 
-
+				
 			}
 		}
 
 }
 
-void SCFeatureExtractor::onEnd(){
+void SCFeatureExtractor::onEnd(bool isWinner){
+	writeBattleData << "endtime:" << Broodwar->getFrameCount() << "\n";
+	if (trackedBattles.empty())
+		writeBattleData << "no open battles\n";
+	else{
+		writeBattleData << "open battles\n";
+		
+		for(std::list<battle>::iterator i=trackedBattles.begin();i!=trackedBattles.end();i++){
+			endBattle((*i),Broodwar->getFrameCount());
+		}
+
+	}
+	
 	writeData.close();
+	writeBattleData.close();
 }
 
 

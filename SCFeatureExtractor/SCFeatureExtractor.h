@@ -6,6 +6,9 @@
 
 using namespace BWAPI;
 
+// uncomment to include extra information in the battle info file, for debugging
+//#define DEBUG_BATTLES_OUTPUT
+
 // these are unit types, they include units, buildings workers and drops
 /*
 const std::string protoss_units[] = {"Protoss Observer", "Protoss Dragoon", "Protoss Zealot", "Protoss Archon", "Protoss Reaver", "Protoss High Templar", 
@@ -58,21 +61,74 @@ const int zerg_units_length = 35;
 // this is how many tiles are in one 'super tile'
 const int super_tile_size=2;
 
+
+// okay, now we are concerned with extracting "battles" from the replays
+struct battle
+{
+	// map player id to lists of units,timestamps, tells when each unit entered the battle
+	//std::map<int,std::list<std::pair<BWAPI::Unit*,int>>> enteredUnits;
+	std::map<int,std::map<Unit*,int>> enteredUnits;
+
+	// when a unit dies the unittype of the unit object gets switched to unknown
+	// so let's keep track of what unit-ids had what type before they died
+	std::map<int, UnitType> trackedUnitTypes;
+
+	// framecount of when we started tracking this battle
+	int startTime;
+
+	// framecount of when battle was last updated
+	int curTime;
+
+	// current middle of battle
+	Position battleCenter;
+
+	// current battle radius
+	int radius;
+
+	// for identifying which battle is which, mostly for debugging purposes
+	int id;
+
+	// for quick computing, from player ids to unit count
+	//std::map<int, int> numAliveMilitaryUnits;
+};
+
+// constants that have to do with battles
+
+// time in frame counts that we allow 
+const int TIME_LIMIT_SINCE_ACTIVITY=10*24;
+
+// defalut radius, based on the max build tile range of 12
+const int DEFAULT_RADIUS=13*TILE_SIZE;
+
+
 class SCFeatureExtractor : public BWAPI::AIModule
 {
 public:
   virtual void onStart();
   virtual void onFrame();
-  virtual void onEnd();
+  virtual void onEnd(bool isWinner);
+  virtual void onUnitDestroy(Unit* unit);
+  virtual void onUnitCreate(Unit* unit);
 
   // logic to actually dump the vectors to file
   void doDump();
+
+  // updates the states of tracked battles as necessary
+  void updateBattles();
+
+  // ends a tracked battle and writes the battle info to a file
+  //void endBattle(battle *b);
+  // the end_time parameter is the timestamp to be used as the end of the battle
+  void endBattle(battle b, int end_time);
 
   // function for computing the map coverage score for a player
   boost::tuple<int,int,int> compute_map_coverage_score(Player* cur_player);
 
   // the file handle we will be writing to
   std::ofstream writeData;
+
+  // file handle for writing info just about battles to 
+  std::ofstream writeBattleData;
 
   // maps from player ids (ints) to maps of unit_types to counts, one for each player,
   // I am using maps for the player ids instead of arrays in case player ids are not
@@ -123,5 +179,23 @@ public:
   // for keeping track of number of frames workers have been idle for
   // this is a measure of skill, since good players don't usually let thier workers sit around all the time
   std::map<int, int> idleWorkerCount;
+
+  // count frames that supply is maxed out for
+  std::map<int, int> supplyUsedUpFrameCount;
+
+  // count number of queued units each frame, then we can take the average... this is for the total
+  std::map<int,int> queuedUnitsTotal;
+
+  // count number of idle production facilities each frame, then we can take the average... this is for the total
+  std::map<int, int> idleProdFacTotal;
+
+  // battles we are monitoring
+  std::list<battle> trackedBattles;
+
+  // for giving battles unique ids as the game goes on
+  int battlesIDCount;
+
+  // keep track of who is already in a battle, quick look-up, stores unit ids
+  std::set<int> inBattleIds;
 
 };
