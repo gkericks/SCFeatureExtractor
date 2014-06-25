@@ -61,6 +61,19 @@ const int zerg_units_length = 35;
 // this is how many tiles are in one 'super tile'
 const int super_tile_size=2;
 
+// do we ignore battles where no units are lost or not
+const bool ignore_no_death_battles=true;
+
+// so we can't always just use unit pointers because some values (hp, location etc) are updated
+// by starcraft, so we use battleUnit as a way to log info at a particular time (namely, when a unit enters the battle)
+struct battleUnit
+{
+	int hp;
+	int shields;
+	int x;
+	int y;
+
+};
 
 // okay, now we are concerned with extracting "battles" from the replays
 struct battle
@@ -90,7 +103,15 @@ struct battle
 
 	// for quick computing, from player ids to unit count
 	//std::map<int, int> numAliveMilitaryUnits;
+	
+	// for storing the unit records, maps unit ids to battleUnits
+	std::map<int,battleUnit> unitRecords;
+	
+
+	// the unit whose death started the battle
+	Unit* startUnit;
 };
+
 
 // constants that have to do with battles
 
@@ -107,8 +128,11 @@ public:
   virtual void onStart();
   virtual void onFrame();
   virtual void onEnd(bool isWinner);
-  virtual void onUnitDestroy(Unit* unit);
+  //virtual void onUnitDestroy(Unit* unit);
   virtual void onUnitCreate(Unit* unit);
+  virtual void onPlayerLeft(Player* player);
+  virtual void onSaveGame(std::string gameName);
+  std::map<int,int> playerLeftTime;
 
   // logic to actually dump the vectors to file
   void doDump();
@@ -116,13 +140,22 @@ public:
   // updates the states of tracked battles as necessary
   void updateBattles();
 
+  // possibly starts a battle, unit is the unit who fired to start the battle
+  void startBattle(Unit* unit);
+
   // ends a tracked battle and writes the battle info to a file
   //void endBattle(battle *b);
   // the end_time parameter is the timestamp to be used as the end of the battle
   void endBattle(battle b, int end_time);
 
+  // returns a battleUnit, which is just a record of some attributes on unit
+  battleUnit makeBattleUnit(Unit* unit);
+
   // function for computing the map coverage score for a player
   boost::tuple<int,int,int> compute_map_coverage_score(Player* cur_player);
+
+  // this just dumps some info that we will use to figure out who won, it is to be called when the game has finished
+  void endGameInfo();
 
   // the file handle we will be writing to
   std::ofstream writeData;
